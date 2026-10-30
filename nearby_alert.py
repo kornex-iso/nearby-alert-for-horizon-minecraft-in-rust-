@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Horizon -> Discord: bagitau bila ada player dekat dengan kau.
+Horizon -> Discord: get notified when a player is near you.
 
-Guna `horizon-ctl` (agent control) untuk baca state game, lepas tu hantar
-alert ke Discord webhook. Tak perlu install apa-apa package (stdlib sahaja).
+Uses `horizon-ctl` (agent control) to read game state, then posts an alert
+to a Discord webhook. Standard library only, no packages to install.
 
 Setup:
   1. Discord: Server Settings -> Integrations -> Webhooks -> New Webhook -> Copy URL
-  2. Jalankan game dengan control socket ON (`--control`), atau guna
+  2. Run the game with the control socket on (`--control`), or use
      `horizon-ctl launch --world X --wait`.
   3. export DISCORD_WEBHOOK="https://discord.com/api/webhooks/...."
-     (jangan share URL ni, sesiapa ada URL boleh post kat channel kau)
-  4. python3 nearby_alert.py --radius 64
+     (keep this URL private: anyone with it can post in your channel)
+  4. python3 nearby_alert.py --radius 64 --me YourMinecraftName
 
-Kalau output JSON `entities` lain sikit dari yang aku jangka, jalankan
-dengan --debug untuk tengok raw output, lepas tu adjust fungsi extract_*().
+If the JSON from `entities` differs from what this script expects, run with
+--debug to see the raw output, then adjust the extract_*/get_xyz functions.
 """
 import argparse
 import json
@@ -28,7 +28,7 @@ import urllib.request
 
 
 def run_ctl(ctl, *args, timeout=10):
-    """Jalankan horizon-ctl, return JSON yang di-parse (atau None kalau gagal)."""
+    """Run horizon-ctl and return the parsed JSON (or None on failure)."""
     try:
         out = subprocess.run(
             [ctl, *args], capture_output=True, text=True, timeout=timeout
@@ -40,18 +40,18 @@ def run_ctl(ctl, *args, timeout=10):
         print(f"[!] horizon-ctl {' '.join(args)} -> exit {out.returncode}: "
               f"{out.stdout.strip() or out.stderr.strip()}", file=sys.stderr)
         return None
-    line = out.stdout.strip().splitlines()
-    if not line:
+    lines = out.stdout.strip().splitlines()
+    if not lines:
         return None
     try:
-        return json.loads(line[-1])
+        return json.loads(lines[-1])
     except json.JSONDecodeError:
-        print(f"[!] bukan JSON: {line[-1][:200]}", file=sys.stderr)
+        print(f"[!] not JSON: {lines[-1][:200]}", file=sys.stderr)
         return None
 
 
 def get_xyz(obj):
-    """Cuba ambil (x, y, z) dari pelbagai bentuk JSON yang mungkin."""
+    """Try to extract (x, y, z) from several possible JSON shapes."""
     if not isinstance(obj, dict):
         return None
     for key in ("pos", "position", "location"):
@@ -107,25 +107,25 @@ def send_discord(webhook, content, embed=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ctl", default=os.environ.get("HORIZON_CTL", "horizon-ctl"),
-                    help="path ke horizon-ctl")
+                    help="path to horizon-ctl")
     ap.add_argument("--webhook", default=os.environ.get("DISCORD_WEBHOOK"),
-                    help="Discord webhook URL (atau set DISCORD_WEBHOOK)")
-    ap.add_argument("--radius", type=float, default=64, help="radius dalam block (default 64)")
-    ap.add_argument("--interval", type=float, default=2.0, help="saat antara setiap check")
+                    help="Discord webhook URL (or set DISCORD_WEBHOOK)")
+    ap.add_argument("--radius", type=float, default=64, help="radius in blocks (default 64)")
+    ap.add_argument("--interval", type=float, default=2.0, help="seconds between checks")
     ap.add_argument("--cooldown", type=float, default=120,
-                    help="saat sebelum player sama di-alert semula (default 120)")
+                    help="seconds before the same player is alerted again (default 120)")
     ap.add_argument("--me", default=os.environ.get("MC_NAME"),
-                    help="username kau, supaya diri sendiri tak masuk alert")
-    ap.add_argument("--notify-leave", action="store_true", help="alert bila player pergi jauh")
-    ap.add_argument("--debug", action="store_true", help="print raw JSON dari horizon-ctl")
+                    help="your username, so you don't alert on yourself")
+    ap.add_argument("--notify-leave", action="store_true", help="alert when a player moves away")
+    ap.add_argument("--debug", action="store_true", help="print raw JSON from horizon-ctl")
     args = ap.parse_args()
 
     if not args.webhook and not args.debug:
-        sys.exit("Set DISCORD_WEBHOOK atau guna --webhook (atau --debug untuk test tanpa Discord).")
+        sys.exit("Set DISCORD_WEBHOOK or use --webhook (or --debug to test without Discord).")
 
-    print(f"[*] Pantau player dalam {args.radius} block. Ctrl+C untuk berhenti.")
-    last_alert = {}   # nama -> masa alert terakhir
-    present = set()   # player yang sedang dekat
+    print(f"[*] Watching for players within {args.radius} blocks. Ctrl+C to stop.")
+    last_alert = {}   # name -> time of last alert
+    present = set()   # players currently nearby
 
     while True:
         try:
@@ -160,34 +160,34 @@ def main():
                 cooled = now - last_alert.get(name, 0) >= args.cooldown
                 if is_new and cooled:
                     last_alert[name] = now
-                    d = f"{dist:.0f} block" if dist is not None else "?"
-                    coords = (f"{pos[0]:.0f}, {pos[1]:.0f}, {pos[2]:.0f}" if pos else "?")
-                    print(f"[ALERT] {name} dekat ({d})")
+                    d = f"{dist:.0f} blocks" if dist is not None else "unknown distance"
+                    coords = (f"{pos[0]:.0f}, {pos[1]:.0f}, {pos[2]:.0f}" if pos else "unknown")
+                    print(f"[ALERT] {name} is nearby ({d})")
                     if args.webhook:
                         send_discord(
                             args.webhook,
-                            f"⚠️ **{name}** dekat dengan kau ({d})",
+                            f"⚠️ **{name}** is near you ({d})",
                             {
-                                "title": "Player dikesan",
+                                "title": "Player detected",
                                 "color": 0xE74C3C,
                                 "fields": [
                                     {"name": "Player", "value": name, "inline": True},
-                                    {"name": "Jarak", "value": d, "inline": True},
+                                    {"name": "Distance", "value": d, "inline": True},
                                     {"name": "Dimension", "value": str(dimension), "inline": True},
-                                    {"name": "Koordinat dia", "value": coords, "inline": False},
+                                    {"name": "Their coordinates", "value": coords, "inline": False},
                                 ],
                             },
                         )
 
             if args.notify_leave and args.webhook:
                 for name in present - set(current):
-                    send_discord(args.webhook, f"✅ **{name}** dah jauh dari kau.")
+                    send_discord(args.webhook, f"✅ **{name}** is no longer nearby.")
 
             present = set(current)
         except KeyboardInterrupt:
-            print("\n[*] Berhenti.")
+            print("\n[*] Stopped.")
             break
-        except Exception as e:  # jangan biar script mati sebab satu error
+        except Exception as e:  # keep running on a single error
             print(f"[!] error: {e}", file=sys.stderr)
 
         time.sleep(args.interval)
